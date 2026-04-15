@@ -158,8 +158,11 @@ func (ovsd *OvsDriver) ovsdbTransact(ops []ovsdb.Operation) ([]ovsdb.OperationRe
 // **************** OVS driver API ********************
 
 // CreatePort Create an internal port in OVS
-func (ovsd *OvsBridgeDriver) CreatePort(intfName, contNetnsPath, contIfaceName, ovnPortName string, ofportRequest uint, vlanTag uint, trunks []uint, portType string, intfType string, contPodUid string) error {
-	intfUUID, intfOp, err := createInterfaceOperation(intfName, ofportRequest, ovnPortName, intfType)
+func (ovsd *OvsBridgeDriver) CreatePort(intfName, contNetnsPath, contIfaceName, ovnPortName string, ofportRequest uint, vlanTag uint, trunks []uint, portType string, intfType string, intfOptions map[string]string, contPodUid string) error {
+
+	log.Printf("Port: %s with port type %s and intefrace type %s", intfName, portType, intfType)
+
+	intfUUID, intfOp, err := createInterfaceOperation(intfName, ofportRequest, ovnPortName, intfType, intfOptions)
 	if err != nil {
 		return err
 	}
@@ -720,6 +723,108 @@ func (ovsd *OvsDriver) FindInterfacesWithError() ([]string, error) {
 	return names, nil
 }
 
+func UseDPDK(driver *OvsDriver, bridgeName string) (bool, error) {
+
+	dpdkInitialized, err := driver.isDPDKInitialized()
+	if err != nil {
+		return false, err
+	}
+
+	netdevDataPath, err := driver.isBridgeDataPathNetDev(bridgeName)
+	if err != nil {
+		return false, err
+	}
+
+	if dpdkInitialized && netdevDataPath {
+		return true, nil
+	}
+
+	return false, nil
+
+}
+
+func (ovsd *OvsDriver) isDPDKInitialized() (bool, error) {
+	selectOp := []ovsdb.Operation{{
+		Op:      "select",
+		Table:   "Open_vSwitch",
+		Where:   []ovsdb.Condition{},
+		Columns: []string{"dpdk_initialized"},
+	}}
+
+	transactionResult, err := ovsd.ovsdbTransact(selectOp)
+	if err != nil {
+		return false, err
+	}
+
+	for _, result := range transactionResult {
+		for _, row := range result.Rows {
+			if enabled, ok := row["dpdk_initialized"]; ok {
+				return enabled.(bool), nil
+			}
+		}
+	}
+
+	return false, nil
+}
+
+func (ovsd *OvsDriver) isBridgeDataPathNetDev(bridgeName string) (bool, error) {
+	condition := ovsdb.NewCondition("name", ovsdb.ConditionEqual, bridgeName)
+	selectOp := []ovsdb.Operation{{
+		Op:      "select",
+		Table:   "Bridge",
+		Where:   []ovsdb.Condition{condition},
+		Columns: []string{"datapath_type"},
+	}}
+
+	transactionResult, err := ovsd.ovsdbTransact(selectOp)
+	if err != nil {
+		return false, err
+	}
+
+	for _, result := range transactionResult {
+		for _, row := range result.Rows {
+			if dpType, ok := row["datapath_type"]; ok {
+				if dpType == "netdev" {
+					return true, nil
+				}
+			}
+		}
+	}
+
+	return false, nil
+}
+
+func GetDefaultDPDKSocketDir(driver *OvsDriver) (string, error) {
+
+	const defaultDPDKSocketDir = "/var/run/openvswitch"
+
+	selectOp := []ovsdb.Operation{{
+		Op:      "select",
+		Table:   "Open_vSwitch",
+		Where:   []ovsdb.Condition{},
+		Columns: []string{"other_config"},
+	}}
+
+	transactionResult, err := driver.ovsdbTransact(selectOp)
+	if err != nil {
+		return defaultDPDKSocketDir, err
+	}
+
+	for _, result := range transactionResult {
+		for _, row := range result.Rows {
+			for _, config := range row {
+				if dir, ok := config.(ovsdb.OvsMap).GoMap["vhost-sock-dir"]; ok {
+					if dir != "" {
+						return dir.(string), nil
+					}
+				}
+			}
+		}
+	}
+
+	return defaultDPDKSocketDir, nil
+}
+
 func hasError(row map[string]interface{}) bool {
 	v := row["error"]
 	switch x := v.(type) {
@@ -816,7 +921,7 @@ func (ovsd *OvsDriver) isMirrorExistsByConditions(conditions []ovsdb.Condition) 
 	return true, nil
 }
 
-func createInterfaceOperation(intfName string, ofportRequest uint, ovnPortName string, intfType string) (ovsdb.UUID, *ovsdb.Operation, error) {
+func createInterfaceOperation(intfName string, ofportRequest uint, ovnPortName string, intfType string, intfOptions map[string]string) (ovsdb.UUID, *ovsdb.Operation, error) {
 	intfUUIDStr := fmt.Sprintf("Intf%s", intfName)
 	intfUUID := ovsdb.UUID{GoUUID: intfUUIDStr}
 
@@ -826,6 +931,14 @@ func createInterfaceOperation(intfName string, ofportRequest uint, ovnPortName s
 	// Configure interface type if not nil
 	if intfType != "" {
 		intf["type"] = intfType
+	}
+
+	if len(intfOptions) > 0 {
+		optionsMap, err := ovsdb.NewOvsMap(intfOptions)
+		if err != nil {
+			return ovsdb.UUID{}, nil, err
+		}
+		intf["options"] = optionsMap
 	}
 
 	// Configure interface ID for ovn
