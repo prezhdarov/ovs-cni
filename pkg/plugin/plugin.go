@@ -48,6 +48,11 @@ import (
 	"github.com/k8snetworkplumbingwg/ovs-cni/pkg/utils"
 )
 
+const (
+	portTypeAccess = "access"
+	portTypeTrunk  = "trunk"
+)
+
 // EnvArgs args containing common, desired mac and ovs port name
 type EnvArgs struct {
 	cnitypes.CommonArgs
@@ -86,7 +91,6 @@ func getHardwareAddr(ifName string) string {
 		return ""
 	}
 	return ifLink.Attrs().HardwareAddr.String()
-
 }
 
 // IPAddrToHWAddr takes the four octets of IPv4 address (aa.bb.cc.dd, for example) and uses them in creating
@@ -281,9 +285,9 @@ func CmdAdd(args *skel.CmdArgs) error {
 
 	var vlanTagNum uint = 0
 	trunks := make([]uint, 0)
-	portType := "access"
+	portType := portTypeAccess
 	if netconf.VlanTag == nil || len(netconf.Trunk) > 0 {
-		portType = "trunk"
+		portType = portTypeTrunk
 		if len(netconf.Trunk) > 0 {
 			trunkVlanIds, err := splitVlanIds(netconf.Trunk)
 			if err != nil {
@@ -352,7 +356,7 @@ func CmdAdd(args *skel.CmdArgs) error {
 	if err != nil {
 		return fmt.Errorf("failed to open netns %q: %v", args.Netns, err)
 	}
-	defer contNetns.Close()
+	defer func() { _ = contNetns.Close() }()
 
 	// userspace driver does not create a network interface for the VF on the host
 	var origIfName string
@@ -544,7 +548,6 @@ func cleanPorts(ovsDriver *ovsdb.OvsBridgeDriver) error {
 }
 
 func removeOvsPort(ovsDriver *ovsdb.OvsBridgeDriver, portName string) error {
-
 	return ovsDriver.DeletePort(portName)
 }
 
@@ -779,11 +782,10 @@ func CmdCheck(args *skel.CmdArgs) error {
 	if err != nil {
 		return fmt.Errorf("failed to open netns %q: %v", args.Netns, err)
 	}
-	defer netns.Close()
+	defer func() { _ = netns.Close() }()
 
 	// Check prevResults for ips and routes against values found in the container
 	if err := netns.Do(func(_ ns.NetNS) error {
-
 		// Check interface against values found in the container
 		err := validateInterface(contIntf, false, ovsHWOffloadEnable)
 		if err != nil {
