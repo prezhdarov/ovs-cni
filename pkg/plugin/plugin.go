@@ -951,12 +951,12 @@ func validateOvs(args *skel.CmdArgs, netconf *types.NetConf, hostIfname string) 
 		return fmt.Errorf("Error: bridge %s is not found in OVS", netconf.BrName)
 	}
 
-	hasError, err := ovsBridgeDriver.InterfaceHasError(hostIfname)
+	ifaces, err := ovsBridgeDriver.FindInterfacesWithError()
 	if err != nil {
 		return err
 	}
-	if hasError {
-		return fmt.Errorf("Error: interface %s is in error state", hostIfname)
+	if len(ifaces) > 0 {
+		return fmt.Errorf("Error: There are some interfaces in error state: %v", ifaces)
 	}
 
 	vlanMode, tag, trunk, err := ovsBridgeDriver.GetOFPortVlanState(hostIfname)

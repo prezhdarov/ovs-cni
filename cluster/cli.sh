@@ -14,10 +14,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-set -ex
-
 SCRIPTS_PATH="$(dirname "$(realpath "$0")")"
 source ${SCRIPTS_PATH}/cluster.sh
 cluster::install
 
-$(cluster::path)/cluster-up/down.sh
+$(cluster::path)/cluster-up/cli.sh "$@"

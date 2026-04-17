@@ -21,7 +21,7 @@ package node
 
 import (
 	"fmt"
-	"os"
+	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -29,20 +29,22 @@ import (
 	"github.com/k8snetworkplumbingwg/ovs-cni/tests/cmd"
 )
 
-// WorkerNode returns the name of the worker node used for tests.
-func WorkerNode() string {
-	if n := os.Getenv("OVS_WORKER_NODE"); n != "" {
-		return n
+// TODO: Use job with a node affinity instead
+func runAtNodeWithExtras(node string, command ...string) (string, error) {
+	ssh := "./cluster/ssh.sh"
+	sshCommand := []string{node, "--"}
+	sshCommand = append(sshCommand, command...)
+	output, err := cmd.Run(ssh, sshCommand...)
+	// Remove first two lines from output, ssh.sh add garbage there
+	outputLines := strings.Split(output, "\n")
+	if len(outputLines) > 2 {
+		output = strings.Join(outputLines[2:], "\n")
 	}
-	return "ovs-cni-worker"
+	return output, err
 }
 
 func RunAtNode(node string, command ...string) (string, error) {
-	execScript := "./cluster/exec.sh"
-	execArgs := []string{node, "--"}
-	execArgs = append(execArgs, command...)
-	output, err := cmd.Run(execScript, execArgs...)
-	return output, err
+	return runAtNodeWithExtras(node, command...)
 }
 
 func RunAtNodes(nodes []string, command ...string) (outputs []string, errs []error) {
@@ -54,16 +56,16 @@ func RunAtNodes(nodes []string, command ...string) (outputs []string, errs []err
 	return outputs, errs
 }
 
-// RemoveOvsBridgeOnNode removes ovs bridge on the worker node
+// RemoveOvsBridgeOnNode removes ovs bridge on the node
 func RemoveOvsBridgeOnNode(bridgeName string) {
 	By("Removing ovs-bridge on the node")
-	out, err := RunAtNode(WorkerNode(), "ovs-vsctl", "--if-exists", "del-br", bridgeName)
+	out, err := RunAtNode("node01", "sudo ovs-vsctl --if-exists del-br "+bridgeName)
 	Expect(err).ToNot(HaveOccurred(), fmt.Sprintf("Failed to run command on node. stdout: %s", out))
 }
 
-// AddOvsBridgeOnNode add ovs bridge on the worker node
+// AddOvsBridgeOnNode add ovs bridge on the node
 func AddOvsBridgeOnNode(bridgeName string) {
 	By("Adding ovs-bridge on the node")
-	out, err := RunAtNode(WorkerNode(), "ovs-vsctl", "add-br", bridgeName)
+	out, err := RunAtNode("node01", "sudo ovs-vsctl add-br "+bridgeName)
 	Expect(err).ToNot(HaveOccurred(), fmt.Sprintf("Failed to run command on node. stdout: %s", out))
 }

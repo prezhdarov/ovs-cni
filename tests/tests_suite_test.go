@@ -22,6 +22,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	ginkgo_reporters "kubevirt.io/qe-tools/pkg/ginkgo-reporters"
 
 	clusterapi "github.com/k8snetworkplumbingwg/ovs-cni/tests/cluster"
 )
@@ -31,7 +32,11 @@ var clusterApi *clusterapi.ClusterAPI
 
 func TestPlugin(t *testing.T) {
 	RegisterFailHandler(Fail)
-	RunSpecs(t, "Plugin Suite")
+	reporters := make([]Reporter, 0)
+	if ginkgo_reporters.JunitOutput != "" {
+		reporters = append(reporters, ginkgo_reporters.NewJunitReporter())
+	}
+	RunSpecsWithDefaultAndCustomReporters(t, "Plugin Suite", reporters)
 }
 
 var _ = BeforeSuite(func() {
@@ -42,11 +47,12 @@ var _ = BeforeSuite(func() {
 	Expect(err).NotTo(HaveOccurred())
 
 	clusterApi = clusterapi.NewClusterAPI(*kubeconfig)
-	clusterApi.CleanupTestNamespaces()
+	clusterApi.RemoveTestNamespace()
+	clusterApi.CreateTestNamespace()
 })
 
 var _ = AfterSuite(func() {
-	clusterApi.DeleteTestNamespacesAsync()
+	clusterApi.RemoveTestNamespace()
 })
 
 func init() {
