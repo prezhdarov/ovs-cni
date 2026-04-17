@@ -415,8 +415,6 @@ func CmdAdd(args *skel.CmdArgs) error {
 
 	}
 
-	log.Printf("Interface MTU: %d", netconf.MTU)
-
 	if err = attachIfaceToBridge(ovsBridgeDriver, hostIface.Name, contIface.Name, netconf.OfportRequest, vlanTagNum, trunks, portType, netconf.InterfaceType, netconf.MTU, interfaceOptions, args.Netns, ovnPort, contPodUid); err != nil {
 		return err
 	}
