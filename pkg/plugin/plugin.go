@@ -26,9 +26,12 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"os"
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strings"
+	"syscall"
 	"time"
 
 	"github.com/containernetworking/cni/pkg/skel"
@@ -191,8 +194,8 @@ func getBridgeName(driver *ovsdb.OvsDriver, bridgeName, ovnPort, deviceID string
 	return "", fmt.Errorf("failed to get bridge name")
 }
 
-func attachIfaceToBridge(ovsDriver *ovsdb.OvsBridgeDriver, hostIfaceName string, contIfaceName string, ofportRequest uint, vlanTag uint, trunks []uint, portType string, intfType string, intfOptions map[string]string, contNetnsPath string, ovnPortName string, contPodUid string) error {
-	err := ovsDriver.CreatePort(hostIfaceName, contNetnsPath, contIfaceName, ovnPortName, ofportRequest, vlanTag, trunks, portType, intfType, intfOptions, contPodUid)
+func attachIfaceToBridge(ovsDriver *ovsdb.OvsBridgeDriver, hostIfaceName string, contIfaceName string, ofportRequest uint, vlanTag uint, trunks []uint, portType string, intfType string, intfMTU int, intfOptions map[string]string, contNetnsPath string, ovnPortName string, contPodUid string) error {
+	err := ovsDriver.CreatePort(hostIfaceName, contNetnsPath, contIfaceName, ovnPortName, ofportRequest, vlanTag, trunks, portType, intfType, intfMTU, intfOptions, contPodUid)
 	if err != nil {
 		return err
 	}
@@ -257,6 +260,27 @@ func splitVlanIds(trunks []*types.Trunk) ([]uint, error) {
 	}
 	sort.Slice(vlanIds, func(i, j int) bool { return vlanIds[i] < vlanIds[j] })
 	return vlanIds, nil
+}
+
+func getIfaceSocket(dpdkSocketDir, podUid, contIface string) (string, error) {
+
+	// first pod, creates the socket dir
+	if err := os.MkdirAll(dpdkSocketDir, 0755); err != nil {
+		return "", err
+	}
+
+	srcPodDir := filepath.Join("/var/lib/kubelet/pods", podUid, "/volumes/kubernetes.io~empty-dir/public")
+	dstPodDir := filepath.Join(dpdkSocketDir, podUid)
+
+	// first NIC, creates the symlink
+	if _, err := os.Stat(dstPodDir); os.IsNotExist(err) {
+		err = os.Symlink(srcPodDir, dstPodDir)
+		if err != nil {
+			return "", err
+		}
+	}
+
+	return filepath.Join(dstPodDir, fmt.Sprintf("%s.sock", strings.TrimPrefix(contIface, "pod"))), nil
 }
 
 // CmdAdd add handler for attaching container into network
@@ -326,30 +350,9 @@ func CmdAdd(args *skel.CmdArgs) error {
 		}
 	}
 
-	// check if DPDK is enabled
-	dpdkEnabled, err := ovsdb.UseDPDK(ovsDriver, netconf.BrName)
-	if err != nil {
-		return err
-	}
-
-	var interfaceOptions = make(map[string]string)
-	// get DPDK socket dir
-	dpdkSocketDir, err := ovsdb.GetDefaultDPDKSocketDir(ovsDriver)
-	if err != nil {
-		return err
-	}
-
-	log.Printf("DPDK Enabled: %v", dpdkEnabled)
-
-	log.Printf("DPDK Socket Dir: %s", dpdkSocketDir)
-
 	// removes all ports whose interfaces have an error
 	if err := cleanPorts(ovsBridgeDriver); err != nil {
 		return err
-	}
-
-	if dpdkEnabled && netconf.InterfaceType == "" {
-		netconf.InterfaceType = "dpdkvhostuserclient"
 	}
 
 	contNetns, err := ns.GetNS(args.Netns)
@@ -385,9 +388,36 @@ func CmdAdd(args *skel.CmdArgs) error {
 			return err
 		}
 	}
-	interfaceOptions["vhost-server-path"] = filepath.Join("/var/lib/kubelet/pods", contPodUid, "/volumes/kubernetes.io~empty-dir/public/vh-nic0") //, contIface.Name)
-	//interfaceOptions["vhost-server-path"] = fmt.Sprintf("%s/%s", dpdkSocketDir, contIface.Name)
-	if err = attachIfaceToBridge(ovsBridgeDriver, hostIface.Name, contIface.Name, netconf.OfportRequest, vlanTagNum, trunks, portType, netconf.InterfaceType, interfaceOptions, args.Netns, ovnPort, contPodUid); err != nil {
+
+	var interfaceOptions = make(map[string]string)
+
+	// check if DPDK is enabled
+	dpdkEnabled, err := ovsdb.UseDPDK(ovsDriver, netconf.BrName)
+	if err != nil {
+		return err
+	}
+
+	if dpdkEnabled && netconf.InterfaceType == "" {
+
+		netconf.InterfaceType = "dpdkvhostuserclient"
+
+		dpdkSocketDir, err := ovsdb.GetDefaultDPDKSocketDir(ovsDriver)
+		if err != nil {
+			return err
+		}
+
+		ifaceSocket, err := getIfaceSocket(dpdkSocketDir, contPodUid, contIface.Name)
+		if err != nil {
+			return err
+		}
+
+		interfaceOptions["vhost-server-path"] = ifaceSocket
+
+	}
+
+	log.Printf("Interface MTU: %d", netconf.MTU)
+
+	if err = attachIfaceToBridge(ovsBridgeDriver, hostIface.Name, contIface.Name, netconf.OfportRequest, vlanTagNum, trunks, portType, netconf.InterfaceType, netconf.MTU, interfaceOptions, args.Netns, ovnPort, contPodUid); err != nil {
 		return err
 	}
 	defer func() {
@@ -551,6 +581,20 @@ func removeOvsPort(ovsDriver *ovsdb.OvsBridgeDriver, portName string) error {
 	return ovsDriver.DeletePort(portName)
 }
 
+func cleanupSocketDir(dpdkSocketDir, podUid string) error {
+	// remove dangling symlink
+	if err := os.Remove(filepath.Join(dpdkSocketDir, podUid)); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+
+	// remove parent dir if empty (other interfaces may still have their symlinks)
+	if err := os.Remove(dpdkSocketDir); err != nil && !os.IsNotExist(err) && !errors.Is(err, syscall.ENOTEMPTY) {
+		return err
+	}
+
+	return nil
+}
+
 // CmdDel remove handler for deleting container from network
 func CmdDel(args *skel.CmdArgs) error {
 	logCall("DEL", args)
@@ -582,8 +626,10 @@ func CmdDel(args *skel.CmdArgs) error {
 	}
 
 	var ovnPort string
+	var contPodUid string
 	if envArgs != nil {
 		ovnPort = string(envArgs.OvnPort)
+		contPodUid = string(envArgs.K8S_POD_UID)
 	}
 	ovsDriver, err := ovsdb.NewOvsDriver(cache.Netconf.SocketFile)
 	if err != nil {
@@ -683,6 +729,25 @@ func CmdDel(args *skel.CmdArgs) error {
 	// removes all ports whose interfaces have an error
 	if err := cleanPorts(ovsBridgeDriver); err != nil {
 		return err
+	}
+
+	dpdkEnabled, err := ovsdb.UseDPDK(ovsDriver, bridgeName)
+	if err != nil {
+		return err
+	}
+
+	if dpdkEnabled {
+
+		dpdkSocketDir, err := ovsdb.GetDefaultDPDKSocketDir(ovsDriver)
+		if err != nil {
+			return err
+		}
+
+		err = cleanupSocketDir(dpdkSocketDir, contPodUid)
+		if err != nil {
+			return err
+		}
+
 	}
 
 	return err
