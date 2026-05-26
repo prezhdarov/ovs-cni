@@ -797,7 +797,7 @@ func (ovsd *OvsDriver) isBridgeDataPathNetDev(bridgeName string) (bool, error) {
 
 func GetDefaultDPDKSocketDir(driver *OvsDriver) (string, error) {
 
-	const defaultDPDKSocketDir = "/var/run/openvswitch"
+	const defaultDPDKSocketDir = "/var/run/ovs-dpdk"
 
 	selectOp := []ovsdb.Operation{{
 		Op:      "select",
